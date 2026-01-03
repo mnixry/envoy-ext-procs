@@ -255,12 +255,13 @@ func setHeaderOverwrite(key, value string) *envoy_api_v3_core.HeaderValueOption 
 
 func downstreamRemoteIP(attrs map[string]*structpb.Struct, headers http.Header) (netip.Addr, bool) {
 	// Try source.address from ext_proc attributes first.
-	if v, ok := attrString(attrs, "source", "address"); ok {
-		if ip, ok := parseIPFromAddress(v); ok {
-			return ip, true
+	if attr, ok := attrs["envoy.filters.http.ext_proc"]; ok {
+		if field, ok := attr.Fields["source.address"]; ok {
+			if ip, ok := parseIPFromAddress(field.GetStringValue()); ok {
+				return ip, true
+			}
 		}
 	}
-	// Fallback to x-envoy-external-address header.
 	if v := headers.Get(HeaderEnvoyExternalAddr); v != "" {
 		return parseIPFromAddress(v)
 	}
@@ -275,22 +276,4 @@ func parseIPFromAddress(addr string) (netip.Addr, bool) {
 	} else {
 		return netip.Addr{}, false
 	}
-}
-
-func attrString(attrs map[string]*structpb.Struct, path ...string) (string, bool) {
-	root := attrs[path[0]]
-	if root == nil {
-		return "", false
-	}
-	cur := root
-	for _, key := range path[1 : len(path)-1] {
-		cur = cur.Fields[key].GetStructValue()
-		if cur == nil {
-			return "", false
-		}
-	}
-	if s := cur.Fields[path[len(path)-1]].GetStringValue(); s != "" {
-		return s, true
-	}
-	return "", false
 }
