@@ -55,11 +55,13 @@ func main() {
 		log.Fatal().Err(oops.Wrapf(err, "failed to listen on port %d", cli.GRPC.Port)).Send()
 	}
 
-	creds, err := tlsutil.LoadTLSCredentials(cli.GRPC.CertPath)
+	certWatcher, err := tlsutil.NewCertWatcher(cli.GRPC.CertPath, log)
 	if err != nil {
-		log.Fatal().Err(oops.Wrapf(err, "failed to load TLS credentials from %s", cli.GRPC.CertPath)).Send()
+		log.Fatal().Err(oops.Wrapf(err, "failed to create certificate watcher for %s", cli.GRPC.CertPath)).Send()
 	}
-	gs := grpc.NewServer(grpc.Creds(creds))
+	defer certWatcher.Close()
+
+	gs := grpc.NewServer(grpc.Creds(certWatcher.TransportCredentials()))
 	envoy_service_proc_v3.RegisterExternalProcessorServer(gs, extproc.New(validator, log))
 
 	log.Info().Int("port", cli.GRPC.Port).Msg("gRPC server listening")

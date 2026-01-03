@@ -10,6 +10,8 @@ import (
 	"google.golang.org/grpc/credentials"
 )
 
+// LoadTLSCredentials loads TLS credentials from a certificate directory (static, no watching).
+// Deprecated: Use NewCertWatcher for automatic certificate reloading.
 func LoadTLSCredentials(certPath string) (credentials.TransportCredentials, error) {
 	certFile := filepath.Join(certPath, "server.crt")
 	keyFile := filepath.Join(certPath, "server.key")
@@ -26,6 +28,7 @@ func LoadTLSCredentials(certPath string) (credentials.TransportCredentials, erro
 	return credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{cert}}), nil
 }
 
+// LoadCA loads a CA certificate pool from a file.
 func LoadCA(caPath string) (*x509.CertPool, error) {
 	caCert, err := os.ReadFile(caPath)
 	if err != nil {
