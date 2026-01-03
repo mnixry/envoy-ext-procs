@@ -26,6 +26,14 @@ const (
 	HeaderEnvoyExternalAddr = "x-envoy-external-address"
 )
 
+type TrustLevel string
+
+const (
+	TrustLevelNo      TrustLevel = "no"
+	TrustLevelYes     TrustLevel = "yes"
+	TrustLevelUnknown TrustLevel = "unknown"
+)
+
 type EdgeOneValidator interface {
 	IsEdgeOneIP(ip netip.Addr) (bool, error)
 }
@@ -53,16 +61,18 @@ func (s *Server) Process(srv envoy_service_proc_v3.ExternalProcessor_ProcessServ
 		default:
 		}
 		if req, err := srv.Recv(); err == nil {
-			start := time.Now()
-			resp := s.processOne(req)
-			s.log.Trace().
-				Dur("duration", time.Since(start)).
-				Interface("request", req).
-				Interface("response", resp).
-				Msg("request processed")
-			if err := srv.Send(resp); err != nil {
-				s.log.Error().Err(oops.Wrapf(err, "failed to send response")).Send()
-			}
+			go func() {
+				start := time.Now()
+				resp := s.processOne(req)
+				s.log.Trace().
+					Dur("duration", time.Since(start)).
+					Interface("request", req).
+					Interface("response", resp).
+					Msg("request processed")
+				if err := srv.Send(resp); err != nil {
+					s.log.Error().Err(oops.Wrapf(err, "failed to send response")).Send()
+				}
+			}()
 		} else if status.Code(err) == codes.Canceled || errors.Is(err, io.EOF) {
 			return nil
 		} else {
@@ -103,8 +113,11 @@ func (s *Server) processRequestHeaders(
 	req *envoy_service_proc_v3.ProcessingRequest,
 	h *envoy_service_proc_v3.HttpHeaders,
 ) *envoy_service_proc_v3.ProcessingResponse {
-	headers := make(http.Header)
+	common := &envoy_service_proc_v3.CommonResponse{
+		Status: envoy_service_proc_v3.CommonResponse_CONTINUE,
+	}
 	if h != nil {
+		headers := make(http.Header)
 		for _, hdr := range h.GetHeaders().GetHeaders() {
 			if raw := hdr.GetRawValue(); len(raw) > 0 {
 				headers.Add(hdr.GetKey(), string(raw))
@@ -112,18 +125,13 @@ func (s *Server) processRequestHeaders(
 				headers.Add(hdr.GetKey(), hdr.GetValue())
 			}
 		}
-	}
-
-	setHeaders := s.edgeOneHeaderMutations(req.GetAttributes(), headers)
-	common := &envoy_service_proc_v3.CommonResponse{
-		Status: envoy_service_proc_v3.CommonResponse_CONTINUE,
-	}
-	if len(setHeaders) > 0 {
-		common.HeaderMutation = &envoy_service_proc_v3.HeaderMutation{
-			SetHeaders: setHeaders,
+		setHeaders := s.edgeOneHeaderMutations(req.GetAttributes(), headers)
+		if len(setHeaders) > 0 {
+			common.HeaderMutation = &envoy_service_proc_v3.HeaderMutation{
+				SetHeaders: setHeaders,
+			}
 		}
 	}
-
 	return &envoy_service_proc_v3.ProcessingResponse{
 		Response: &envoy_service_proc_v3.ProcessingResponse_RequestHeaders{
 			RequestHeaders: &envoy_service_proc_v3.HeadersResponse{Response: common},
@@ -142,27 +150,26 @@ func (s *Server) edgeOneHeaderMutations(
 			Interface("headers", headers).
 			Msg("downstream remote IP not found")
 		return []*envoy_api_v3_core.HeaderValueOption{
-			setHeaderOverwrite(HeaderTrusted, "no"),
+			setHeaderOverwrite(HeaderTrusted, string(TrustLevelUnknown)),
 		}
 	}
 
-	var trustedVal string
-	if isEdgeOne, err := s.edgeone.IsEdgeOneIP(remoteIP); err != nil {
+	trustedVal := TrustLevelNo
+	if isEdgeOne, err := s.edgeone.IsEdgeOneIP(remoteIP); err == nil && isEdgeOne {
+		trustedVal = TrustLevelYes
+	} else if err != nil {
 		s.log.Error().
 			Err(oops.Wrapf(err, "edgeone validation failed")).
 			Str("remote_ip", remoteIP.String()).
 			Send()
-		trustedVal = "no"
-	} else if isEdgeOne {
-		trustedVal = "yes"
 	}
 
 	remoteIPStr := remoteIP.String()
 	out := []*envoy_api_v3_core.HeaderValueOption{
-		setHeaderOverwrite(HeaderTrusted, trustedVal),
+		setHeaderOverwrite(HeaderTrusted, string(trustedVal)),
 	}
 
-	if trustedVal == "no" {
+	if trustedVal == TrustLevelNo {
 		out = append(out,
 			setHeaderOverwrite(HeaderXFF, remoteIPStr),
 			setHeaderOverwrite(HeaderXRealIP, remoteIPStr),
