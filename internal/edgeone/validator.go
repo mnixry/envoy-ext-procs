@@ -70,19 +70,20 @@ func (v *Validator) IsEdgeOneIP(ip netip.Addr) (bool, error) {
 		return cached, nil
 	}
 
-	// EdgeOne IPs are public; private/loopback can never be EdgeOne.
-	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
-		return false, nil
-	}
-
 	val, err, _ := v.sg.Do(ipStr, func() (any, error) {
 		if cached, ok := v.cache.Get(ipStr); ok {
 			return cached, nil
 		}
+		start := time.Now()
 		valid, err := v.validateIP(ip)
 		if err != nil {
 			return false, err
 		}
+		v.log.Info().
+			Dur("duration", time.Since(start)).
+			Str("ip", ipStr).
+			Bool("valid", valid).
+			Msg("IP region validation result")
 		v.cache.Add(ipStr, valid)
 		return valid, nil
 	})
@@ -90,6 +91,11 @@ func (v *Validator) IsEdgeOneIP(ip netip.Addr) (bool, error) {
 }
 
 func (v *Validator) validateIP(ip netip.Addr) (bool, error) {
+	// EdgeOne IPs are public; private/loopback can never be EdgeOne.
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
+		return false, nil
+	}
+
 	req := teo.NewDescribeIPRegionRequest()
 	req.IPs = []*string{common.StringPtr(ip.String())}
 
@@ -105,10 +111,11 @@ func (v *Validator) validateIP(ip netip.Addr) (bool, error) {
 	validated := slices.ContainsFunc(resp.Response.IPRegionInfo, func(info *teo.IPRegionInfo) bool {
 		return strings.EqualFold(*info.IsEdgeOneIP, "yes")
 	})
-	v.log.Info().
+	v.log.Debug().
 		Str("ip", ip.String()).
 		Bool("valid", validated).
-		Interface("response", resp.Response.IPRegionInfo).
+		Interface("request", req).
+		Interface("response", resp).
 		Msg("IP region validation result")
 	return validated, nil
 }
