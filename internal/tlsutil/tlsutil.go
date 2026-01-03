@@ -36,6 +36,12 @@ func LoadCA(caPath string) (*x509.CertPool, error) {
 			Wrapf(err, "failed to read CA certificate")
 	}
 	pool := x509.NewCertPool()
-	pool.AppendCertsFromPEM(caCert)
+	if ok := pool.AppendCertsFromPEM(caCert); !ok {
+		return nil, oops.
+			In("tlsutil").
+			Code("APPEND_CERTS_FAILED").
+			With("ca_file", caPath).
+			Errorf("failed to append CA certificate to pool")
+	}
 	return pool, nil
 }

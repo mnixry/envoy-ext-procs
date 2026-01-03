@@ -80,18 +80,14 @@ func main() {
 }
 
 func healthCheckHandler(w http.ResponseWriter, r *http.Request, log zerolog.Logger, caFile string, grpcPort int, dialServerName string) {
-	var tlsConfig *tls.Config
+	tlsConfig := &tls.Config{
+		ServerName: dialServerName,
+	}
 	if certPool, err := tlsutil.LoadCA(caFile); err == nil {
-		tlsConfig = &tls.Config{
-			RootCAs:    certPool,
-			ServerName: dialServerName,
-		}
+		tlsConfig.RootCAs = certPool
 	} else {
 		log.Warn().Err(oops.Wrapf(err, "could not load CA certificate")).Msg("certificate verification disabled")
-		tlsConfig = &tls.Config{
-			ServerName:         dialServerName,
-			InsecureSkipVerify: true,
-		}
+		tlsConfig.InsecureSkipVerify = true
 	}
 
 	// Create gRPC dial options.
