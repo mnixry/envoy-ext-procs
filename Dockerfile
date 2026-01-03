@@ -4,6 +4,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
     go mod download
+COPY . .
 RUN --mount=type=cache,id=go-build,target=/root/.cache/go-build \
     --mount=type=cache,id=go-mod,target=/go/pkg/mod \
     mkdir -p /out && \
