@@ -1,6 +1,7 @@
 package extproc
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,19 +52,20 @@ func (s *Server) Process(srv envoy_service_proc_v3.ExternalProcessor_ProcessServ
 			return ctx.Err()
 		default:
 		}
-		switch req, err := srv.Recv(); err {
-		case io.EOF:
-			return nil
-		case nil:
+		if req, err := srv.Recv(); err == nil {
 			start := time.Now()
 			resp := s.processOne(req)
-			s.log.Info().
+			s.log.Trace().
 				Dur("duration", time.Since(start)).
+				Interface("request", req).
+				Interface("response", resp).
 				Msg("request processed")
 			if err := srv.Send(resp); err != nil {
 				s.log.Error().Err(oops.Wrapf(err, "failed to send response")).Send()
 			}
-		default:
+		} else if status.Code(err) == codes.Canceled || errors.Is(err, io.EOF) {
+			return nil
+		} else {
 			s.log.Error().Err(oops.Wrapf(err, "failed to receive request")).Send()
 			return status.Errorf(codes.Unknown, "cannot receive stream request: %v", err)
 		}
