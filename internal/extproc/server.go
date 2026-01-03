@@ -3,6 +3,7 @@ package extproc
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"net/netip"
 	"strings"
 	"time"
@@ -17,8 +18,7 @@ import (
 )
 
 const (
-	HeaderTrustedPrimary    = "x-forwarded-from-edgeone"
-	HeaderTrustedSecondary  = "x-edgeone-trusted"
+	HeaderTrusted           = "x-forwarded-from-edgeone"
 	HeaderDownstreamRealIP  = "eo-connecting-ip"
 	HeaderXFF               = "x-forwarded-for"
 	HeaderXRealIP           = "x-real-ip"
@@ -101,9 +101,15 @@ func (s *Server) processRequestHeaders(
 	req *envoy_service_proc_v3.ProcessingRequest,
 	h *envoy_service_proc_v3.HttpHeaders,
 ) *envoy_service_proc_v3.ProcessingResponse {
-	var headers []*envoy_api_v3_core.HeaderValue
+	headers := make(http.Header)
 	if h != nil {
-		headers = h.GetHeaders().GetHeaders()
+		for _, hdr := range h.GetHeaders().GetHeaders() {
+			if raw := hdr.GetRawValue(); len(raw) > 0 {
+				headers.Add(hdr.GetKey(), string(raw))
+			} else {
+				headers.Add(hdr.GetKey(), hdr.GetValue())
+			}
+		}
 	}
 
 	setHeaders := s.edgeOneHeaderMutations(req.GetAttributes(), headers)
@@ -124,9 +130,8 @@ func (s *Server) processRequestHeaders(
 }
 
 func (s *Server) edgeOneHeaderMutations(
-
 	attrs map[string]*structpb.Struct,
-	headers []*envoy_api_v3_core.HeaderValue,
+	headers http.Header,
 ) []*envoy_api_v3_core.HeaderValueOption {
 	remoteIP, ok := downstreamRemoteIP(attrs, headers)
 	if !ok {
@@ -135,8 +140,7 @@ func (s *Server) edgeOneHeaderMutations(
 			Interface("headers", headers).
 			Msg("downstream remote IP not found")
 		return []*envoy_api_v3_core.HeaderValueOption{
-			setHeaderOverwrite(HeaderTrustedPrimary, "no"),
-			setHeaderOverwrite(HeaderTrustedSecondary, "no"),
+			setHeaderOverwrite(HeaderTrusted, "no"),
 		}
 	}
 
@@ -153,8 +157,7 @@ func (s *Server) edgeOneHeaderMutations(
 
 	remoteIPStr := remoteIP.String()
 	out := []*envoy_api_v3_core.HeaderValueOption{
-		setHeaderOverwrite(HeaderTrustedPrimary, trustedVal),
-		setHeaderOverwrite(HeaderTrustedSecondary, trustedVal),
+		setHeaderOverwrite(HeaderTrusted, trustedVal),
 	}
 
 	if trustedVal == "no" {
@@ -165,7 +168,7 @@ func (s *Server) edgeOneHeaderMutations(
 		return out
 	}
 
-	if downstreamRaw, ok := getHeaderValue(headers, HeaderDownstreamRealIP); ok {
+	if downstreamRaw := headers.Get(HeaderDownstreamRealIP); downstreamRaw != "" {
 		if downstreamIP, ok := parseIPFromAddress(downstreamRaw); ok {
 			downstreamIPStr := downstreamIP.String()
 			out = append(out,
@@ -242,25 +245,15 @@ func continueResponseTrailers() *envoy_service_proc_v3.ProcessingResponse {
 func setHeaderOverwrite(key, value string) *envoy_api_v3_core.HeaderValueOption {
 	return &envoy_api_v3_core.HeaderValueOption{
 		Header: &envoy_api_v3_core.HeaderValue{
-			Key:   strings.ToLower(key),
-			Value: value,
+			Key:      strings.ToLower(key),
+			Value:    value,
+			RawValue: []byte(value),
 		},
 		AppendAction: envoy_api_v3_core.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 	}
 }
 
-func getHeaderValue(headers []*envoy_api_v3_core.HeaderValue, key string) (string, bool) {
-	want := strings.ToLower(key)
-	for _, hdr := range headers {
-		if strings.ToLower(hdr.GetKey()) != want {
-			continue
-		}
-		return hdr.GetValue(), true
-	}
-	return "", false
-}
-
-func downstreamRemoteIP(attrs map[string]*structpb.Struct, headers []*envoy_api_v3_core.HeaderValue) (netip.Addr, bool) {
+func downstreamRemoteIP(attrs map[string]*structpb.Struct, headers http.Header) (netip.Addr, bool) {
 	// Try source.address from ext_proc attributes first.
 	if v, ok := attrString(attrs, "source", "address"); ok {
 		if ip, ok := parseIPFromAddress(v); ok {
@@ -268,10 +261,8 @@ func downstreamRemoteIP(attrs map[string]*structpb.Struct, headers []*envoy_api_
 		}
 	}
 	// Fallback to x-envoy-external-address header.
-	if v, ok := getHeaderValue(headers, HeaderEnvoyExternalAddr); ok {
-		if ip, ok := parseIPFromAddress(v); ok {
-			return ip, true
-		}
+	if v := headers.Get(HeaderEnvoyExternalAddr); v != "" {
+		return parseIPFromAddress(v)
 	}
 	return netip.Addr{}, false
 }
