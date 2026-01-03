@@ -70,7 +70,7 @@ func main() {
 	}()
 
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		healthCheckHandler(w, r, log, cli.GRPC.CertPath, cli.GRPC.Port, cli.Health.DialServerName)
+		healthCheckHandler(w, r, log, cli.GRPC.CAFile, cli.GRPC.Port, cli.Health.DialServerName)
 	})
 	log.Info().Int("port", cli.Health.Port).Msg("health check server listening")
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", cli.Health.Port), nil); err != nil {
@@ -79,18 +79,19 @@ func main() {
 	}
 }
 
-func healthCheckHandler(w http.ResponseWriter, r *http.Request, log zerolog.Logger, certPath string, grpcPort int, dialServerName string) {
-	certPool, err := tlsutil.LoadCA(certPath)
-	if err != nil {
-		log.Warn().Err(oops.Wrapf(err, "could not load CA certificate")).Msg("healthz failed")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		return
-	}
-
-	// Create TLS configuration.
-	tlsConfig := &tls.Config{
-		RootCAs:    certPool,
-		ServerName: dialServerName,
+func healthCheckHandler(w http.ResponseWriter, r *http.Request, log zerolog.Logger, caFile string, grpcPort int, dialServerName string) {
+	var tlsConfig *tls.Config
+	if certPool, err := tlsutil.LoadCA(caFile); err == nil {
+		tlsConfig = &tls.Config{
+			RootCAs:    certPool,
+			ServerName: dialServerName,
+		}
+	} else {
+		log.Warn().Err(oops.Wrapf(err, "could not load CA certificate")).Msg("certificate verification disabled")
+		tlsConfig = &tls.Config{
+			ServerName:         dialServerName,
+			InsecureSkipVerify: true,
+		}
 	}
 
 	// Create gRPC dial options.

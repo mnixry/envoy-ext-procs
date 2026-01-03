@@ -27,14 +27,12 @@ func LoadTLSCredentials(certPath string) (credentials.TransportCredentials, erro
 }
 
 func LoadCA(caPath string) (*x509.CertPool, error) {
-	caFile := filepath.Join(caPath, "server.crt")
-
-	caCert, err := os.ReadFile(caFile)
+	caCert, err := os.ReadFile(caPath)
 	if err != nil {
 		return nil, oops.
 			In("tlsutil").
 			Code("READ_CA_FAILED").
-			With("ca_file", caFile).
+			With("ca_file", caPath).
 			Wrapf(err, "failed to read CA certificate")
 	}
 	pool := x509.NewCertPool()

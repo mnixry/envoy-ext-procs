@@ -13,6 +13,7 @@ type CLI struct {
 type GRPCConfig struct {
 	Port     int    `name:"port" env:"PORT" default:"9002" help:"gRPC server listen port."`
 	CertPath string `name:"cert-path" env:"CERT_PATH" type:"path" required:"" help:"Path to directory containing server.crt and server.key for TLS."`
+	CAFile   string `name:"ca-file" env:"CA_FILE" type:"path" help:"Path to CA certificate file for TLS."`
 }
 
 type HealthConfig struct {
