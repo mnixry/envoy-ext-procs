@@ -1,13 +1,13 @@
 package edgeone
 
 import (
-	"context"
 	"net/netip"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
+	"github.com/rs/zerolog"
 	"github.com/samber/oops"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
@@ -29,9 +29,10 @@ type Validator struct {
 	cache  *expirable.LRU[string, bool]
 	client *teo.Client
 	sg     singleflight.Group
+	log    zerolog.Logger
 }
 
-func New(cfg Config) (*Validator, error) {
+func New(cfg Config, log zerolog.Logger) (*Validator, error) {
 	if strings.TrimSpace(cfg.SecretID) == "" || strings.TrimSpace(cfg.SecretKey) == "" {
 		return nil, oops.
 			In("edgeone").
@@ -57,10 +58,11 @@ func New(cfg Config) (*Validator, error) {
 	return &Validator{
 		cache:  expirable.NewLRU[string, bool](cfg.CacheSize, nil, cfg.CacheTTL),
 		client: client,
+		log:    log.With().Str("component", "edgeone").Logger(),
 	}, nil
 }
 
-func (v *Validator) IsEdgeOneIP(ctx context.Context, ip netip.Addr) (bool, error) {
+func (v *Validator) IsEdgeOneIP(ip netip.Addr) (bool, error) {
 	ip = ip.Unmap()
 	ipStr := ip.String()
 
@@ -77,7 +79,7 @@ func (v *Validator) IsEdgeOneIP(ctx context.Context, ip netip.Addr) (bool, error
 		if cached, ok := v.cache.Get(ipStr); ok {
 			return cached, nil
 		}
-		valid, err := v.validateIP(ctx, ip)
+		valid, err := v.validateIP(ip)
 		if err != nil {
 			return false, err
 		}
@@ -87,11 +89,11 @@ func (v *Validator) IsEdgeOneIP(ctx context.Context, ip netip.Addr) (bool, error
 	return val.(bool), err
 }
 
-func (v *Validator) validateIP(ctx context.Context, ip netip.Addr) (bool, error) {
+func (v *Validator) validateIP(ip netip.Addr) (bool, error) {
 	req := teo.NewDescribeIPRegionRequest()
 	req.IPs = []*string{common.StringPtr(ip.String())}
 
-	resp, err := v.client.DescribeIPRegionWithContext(ctx, req)
+	resp, err := v.client.DescribeIPRegion(req)
 	if err != nil {
 		return false, oops.
 			In("edgeone").
@@ -100,7 +102,13 @@ func (v *Validator) validateIP(ctx context.Context, ip netip.Addr) (bool, error)
 			Wrapf(err, "failed to describe IP region")
 	}
 
-	return slices.ContainsFunc(resp.Response.IPRegionInfo, func(info *teo.IPRegionInfo) bool {
+	validated := slices.ContainsFunc(resp.Response.IPRegionInfo, func(info *teo.IPRegionInfo) bool {
 		return strings.EqualFold(*info.IsEdgeOneIP, "yes")
-	}), nil
+	})
+	v.log.Info().
+		Str("ip", ip.String()).
+		Bool("valid", validated).
+		Interface("response", resp.Response.IPRegionInfo).
+		Msg("IP region validation result")
+	return validated, nil
 }

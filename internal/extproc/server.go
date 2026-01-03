@@ -26,7 +26,7 @@ const (
 )
 
 type EdgeOneValidator interface {
-	IsEdgeOneIP(ctx context.Context, ip netip.Addr) (bool, error)
+	IsEdgeOneIP(ip netip.Addr) (bool, error)
 }
 
 type Server struct {
@@ -132,7 +132,7 @@ func (s *Server) edgeOneHeaderMutations(
 	}
 
 	var trustedVal string
-	if isEdgeOne, err := s.edgeone.IsEdgeOneIP(ctx, remoteIP); err != nil {
+	if isEdgeOne, err := s.edgeone.IsEdgeOneIP(remoteIP); err != nil {
 		s.log.Error().
 			Err(oops.Wrapf(err, "edgeone validation failed")).
 			Str("remote_ip", remoteIP.String()).

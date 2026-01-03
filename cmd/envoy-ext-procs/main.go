@@ -38,7 +38,7 @@ func main() {
 		CacheSize:   cli.EdgeOne.CacheSize,
 		CacheTTL:    cli.EdgeOne.CacheTTL,
 		Timeout:     cli.EdgeOne.Timeout,
-	})
+	}, log)
 	if err != nil {
 		log.Fatal().Err(oops.Wrapf(err, "edgeone validator init failed")).Send()
 	}
