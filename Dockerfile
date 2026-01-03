@@ -12,6 +12,12 @@ RUN --mount=type=cache,id=go-build,target=/root/.cache/go-build \
     ls -la /out
 
 FROM debian:trixie-slim AS runner
+
+RUN apt-get update && \
+    apt-get install -y tini ca-certificates && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /out/* /usr/local/bin/
 EXPOSE 9002
-ENTRYPOINT ["/usr/local/bin/envoy-ext-procs"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
