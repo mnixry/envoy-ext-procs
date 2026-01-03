@@ -2,12 +2,15 @@ package config
 
 import (
 	"time"
+
+	"github.com/rs/zerolog"
 )
 
 type CLI struct {
-	GRPC    GRPCConfig    `embed:"" prefix:"grpc-" envprefix:"GRPC_"`
-	Health  HealthConfig  `embed:"" prefix:"health-" envprefix:"HEALTH_"`
-	EdgeOne EdgeOneConfig `embed:"" prefix:"edgeone-" envprefix:"EDGEONE_"`
+	GRPC     GRPCConfig    `embed:"" prefix:"grpc-" envprefix:"GRPC_"`
+	Health   HealthConfig  `embed:"" prefix:"health-" envprefix:"HEALTH_"`
+	EdgeOne  EdgeOneConfig `embed:"" prefix:"edgeone-" envprefix:"EDGEONE_"`
+	LogLevel zerolog.Level `name:"log-level" env:"LOG_LEVEL" default:"info" help:"Log level (debug, info, warn, error, fatal, panic)."`
 }
 
 type GRPCConfig struct {

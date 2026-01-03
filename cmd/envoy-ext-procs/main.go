@@ -22,14 +22,14 @@ import (
 )
 
 func main() {
-	log := logger.New()
-
 	var cli config.CLI
 	kong.Parse(&cli,
 		kong.Description("Envoy external processor gRPC server with EdgeOne IP validation."),
 		kong.UsageOnError(),
 	)
+	zerolog.SetGlobalLevel(cli.LogLevel)
 
+	log := logger.New()
 	validator, err := edgeone.New(edgeone.Config{
 		SecretID:    cli.EdgeOne.SecretID,
 		SecretKey:   cli.EdgeOne.SecretKey,

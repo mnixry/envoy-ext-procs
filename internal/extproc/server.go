@@ -233,8 +233,8 @@ func continueResponseTrailers() *envoy_service_proc_v3.ProcessingResponse {
 func setHeaderOverwrite(key, value string) *envoy_api_v3_core.HeaderValueOption {
 	return &envoy_api_v3_core.HeaderValueOption{
 		Header: &envoy_api_v3_core.HeaderValue{
-			Key:      strings.ToLower(key),
-			RawValue: []byte(value),
+			Key:   strings.ToLower(key),
+			Value: value,
 		},
 		AppendAction: envoy_api_v3_core.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 	}
@@ -245,9 +245,6 @@ func getHeaderValue(headers []*envoy_api_v3_core.HeaderValue, key string) (strin
 	for _, hdr := range headers {
 		if strings.ToLower(hdr.GetKey()) != want {
 			continue
-		}
-		if raw := hdr.GetRawValue(); len(raw) > 0 {
-			return string(raw), true
 		}
 		return hdr.GetValue(), true
 	}
