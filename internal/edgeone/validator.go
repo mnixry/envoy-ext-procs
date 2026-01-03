@@ -71,7 +71,7 @@ func (v *Validator) IsEdgeOneIP(ip netip.Addr) (bool, error) {
 	}
 
 	// EdgeOne IPs are public; private/loopback can never be EdgeOne.
-	if !ip.IsGlobalUnicast() {
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
 		return false, nil
 	}
 
