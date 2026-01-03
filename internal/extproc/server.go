@@ -1,11 +1,11 @@
 package extproc
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net/netip"
 	"strings"
+	"time"
 
 	envoy_api_v3_core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	envoy_service_proc_v3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -51,26 +51,33 @@ func (s *Server) Process(srv envoy_service_proc_v3.ExternalProcessor_ProcessServ
 			return ctx.Err()
 		default:
 		}
-
-		req, err := srv.Recv()
-		if err == io.EOF {
+		switch req, err := srv.Recv(); err {
+		case io.EOF:
 			return nil
-		}
-		if err != nil {
+		case nil:
+			start := time.Now()
+			resp := s.processOne(req)
+			s.log.Info().
+				Dur("duration", time.Since(start)).
+				Msg("request processed")
+			if err := srv.Send(resp); err != nil {
+				s.log.Error().Err(oops.Wrapf(err, "failed to send response")).Send()
+			}
+		default:
+			s.log.Error().Err(oops.Wrapf(err, "failed to receive request")).Send()
 			return status.Errorf(codes.Unknown, "cannot receive stream request: %v", err)
-		}
-
-		resp := s.processOne(ctx, req)
-		if err := srv.Send(resp); err != nil {
-			s.log.Error().Err(oops.Wrapf(err, "failed to send response")).Send()
 		}
 	}
 }
 
-func (s *Server) processOne(ctx context.Context, req *envoy_service_proc_v3.ProcessingRequest) *envoy_service_proc_v3.ProcessingResponse {
+func (s *Server) processOne(req *envoy_service_proc_v3.ProcessingRequest) *envoy_service_proc_v3.ProcessingResponse {
+	s.log.Debug().
+		Interface("request", req.Request).
+		Type("request_type", req.Request).
+		Msg("processing request")
 	switch v := req.Request.(type) {
 	case *envoy_service_proc_v3.ProcessingRequest_RequestHeaders:
-		return s.processRequestHeaders(ctx, req, v.RequestHeaders)
+		return s.processRequestHeaders(req, v.RequestHeaders)
 	case *envoy_service_proc_v3.ProcessingRequest_ResponseHeaders:
 		return continueResponseHeaders()
 	case *envoy_service_proc_v3.ProcessingRequest_RequestBody:
@@ -82,13 +89,15 @@ func (s *Server) processOne(ctx context.Context, req *envoy_service_proc_v3.Proc
 	case *envoy_service_proc_v3.ProcessingRequest_ResponseTrailers:
 		return continueResponseTrailers()
 	default:
-		s.log.Warn().Str("type", fmt.Sprintf("%T", v)).Msg("unknown request type")
+		s.log.Warn().
+			Interface("request", req.Request).
+			Type("request_type", v).
+			Msg("unknown request type")
 		return &envoy_service_proc_v3.ProcessingResponse{}
 	}
 }
 
 func (s *Server) processRequestHeaders(
-	ctx context.Context,
 	req *envoy_service_proc_v3.ProcessingRequest,
 	h *envoy_service_proc_v3.HttpHeaders,
 ) *envoy_service_proc_v3.ProcessingResponse {
@@ -97,7 +106,7 @@ func (s *Server) processRequestHeaders(
 		headers = h.GetHeaders().GetHeaders()
 	}
 
-	setHeaders := s.edgeOneHeaderMutations(ctx, req.GetAttributes(), headers)
+	setHeaders := s.edgeOneHeaderMutations(req.GetAttributes(), headers)
 	common := &envoy_service_proc_v3.CommonResponse{
 		Status: envoy_service_proc_v3.CommonResponse_CONTINUE,
 	}
@@ -115,7 +124,7 @@ func (s *Server) processRequestHeaders(
 }
 
 func (s *Server) edgeOneHeaderMutations(
-	ctx context.Context,
+
 	attrs map[string]*structpb.Struct,
 	headers []*envoy_api_v3_core.HeaderValue,
 ) []*envoy_api_v3_core.HeaderValueOption {
