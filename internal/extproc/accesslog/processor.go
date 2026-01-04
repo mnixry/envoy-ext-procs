@@ -93,7 +93,7 @@ func (p *Processor) ProcessRequestHeaders(ctx *extproc.RequestContext) *extproc.
 
 	var clientIP string
 	if xff := ctx.Headers.Get("x-forwarded-for"); xff != "" {
-		first := strings.TrimSpace(xff[:strings.IndexByte(xff, ',')])
+		first, _, _ := strings.Cut(xff, ",")
 		if ip, err := extproc.ParseIPFromAddress(first); err == nil {
 			clientIP = ip.String()
 		} else {
