@@ -1,10 +1,9 @@
-// Package accesslog provides an ext_proc processor that emits Caddy-style
-// JSON access logs for each request/response cycle.
 package accesslog
 
 import (
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,60 +13,32 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// ProcessorFactory creates access log processors.
-type ProcessorFactory struct {
-	accessLog zerolog.Logger
-	errLog    zerolog.Logger
-	// includeRequestHeaders controls whether request headers are logged.
-	includeRequestHeaders bool
-	// includeResponseHeaders controls whether response headers are logged.
-	includeResponseHeaders bool
-	// excludeHeaders is a set of header names (lowercase) to exclude from logging.
-	excludeHeaders map[string]struct{}
+var sensitiveHeaders = []string{
+	"cookie",
+	"set-cookie",
+	"authorization",
+	"proxy-authorization",
 }
 
-// Option configures a ProcessorFactory.
+type ProcessorFactory struct {
+	accessLog      zerolog.Logger
+	errLog         zerolog.Logger
+	excludeHeaders []string
+}
+
 type Option func(*ProcessorFactory)
 
-// WithRequestHeaders enables logging of request headers.
-func WithRequestHeaders(include bool) Option {
+func WithExcludeHeaders(headers ...string) Option {
 	return func(f *ProcessorFactory) {
-		f.includeRequestHeaders = include
+		f.excludeHeaders = append(f.excludeHeaders, headers...)
 	}
 }
 
-// WithResponseHeaders enables logging of response headers.
-func WithResponseHeaders(include bool) Option {
-	return func(f *ProcessorFactory) {
-		f.includeResponseHeaders = include
-	}
-}
-
-// WithExcludeHeaders sets headers to exclude from logging.
-func WithExcludeHeaders(headers []string) Option {
-	return func(f *ProcessorFactory) {
-		f.excludeHeaders = make(map[string]struct{}, len(headers))
-		for _, h := range headers {
-			f.excludeHeaders[strings.ToLower(h)] = struct{}{}
-		}
-	}
-}
-
-// NewProcessorFactory creates a new access log ProcessorFactory.
 func NewProcessorFactory(writer io.Writer, log zerolog.Logger, opts ...Option) *ProcessorFactory {
 	f := &ProcessorFactory{
-		// Create a dedicated logger for access logs with Caddy-style format.
-		accessLog: zerolog.New(writer).With().
-			Str("logger", "http.log.access").
-			Logger(),
-		errLog:                 log.With().Str("processor", "accesslog").Logger(),
-		includeRequestHeaders:  true,
-		includeResponseHeaders: true,
-		excludeHeaders: map[string]struct{}{
-			"authorization": {},
-			"cookie":        {},
-			"set-cookie":    {},
-		},
+		accessLog:      zerolog.New(writer),
+		errLog:         log.With().Str("processor", "accesslog").Logger(),
+		excludeHeaders: append([]string(nil), sensitiveHeaders...),
 	}
 	for _, opt := range opts {
 		opt(f)
@@ -77,34 +48,35 @@ func NewProcessorFactory(writer io.Writer, log zerolog.Logger, opts ...Option) *
 
 // NewProcessor creates a new access log processor for a single request.
 func (f *ProcessorFactory) NewProcessor() extproc.Processor {
-	return &Processor{
-		factory:   f,
-		startTime: time.Now(),
-	}
+	return &Processor{factory: f}
 }
 
-// requestInfo holds request metadata for logging.
 type requestInfo struct {
-	remoteIP string
-	proto    string
-	method   string
-	host     string
-	uri      string
-	headers  http.Header
+	RemoteIP  string              `json:"remote_ip"`
+	ClientIP  string              `json:"client_ip"`
+	Proto     string              `json:"proto"`
+	Method    string              `json:"method"`
+	Host      string              `json:"host"`
+	URI       string              `json:"uri"`
+	Headers   map[string][]string `json:"headers,omitempty"`
+	StartTime time.Time           `json:"start_time"`
+	Size      *uint64             `json:"size"`
 }
 
-// Processor handles access logging for a single request.
+type responseInfo struct {
+	Headers map[string][]string `json:"headers,omitempty"`
+	Size    *uint64             `json:"size"`
+	Status  int                 `json:"status"`
+}
+
 type Processor struct {
 	extproc.BaseProcessor
-	factory   *ProcessorFactory
-	startTime time.Time
+	factory *ProcessorFactory
 
 	mu       sync.Mutex
 	logged   bool
 	request  requestInfo
-	status   int
-	respHdrs http.Header
-	size     int64
+	response responseInfo
 }
 
 // ProcessRequestHeaders captures request metadata for logging.
@@ -112,49 +84,64 @@ func (p *Processor) ProcessRequestHeaders(ctx *extproc.RequestContext) *extproc.
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.request = requestInfo{
-		proto:  ctx.Headers.Get(":protocol"),
-		method: ctx.Headers.Get(":method"),
-		host:   ctx.Headers.Get(":authority"),
-		uri:    ctx.Headers.Get(":path"),
-	}
-
-	// Extract remote IP from attributes or headers.
+	var remoteIP string
 	if ip, err := extproc.GetDownstreamRemoteIP(ctx.Attributes, ctx.Headers); err == nil {
-		p.request.remoteIP = ip.String()
+		remoteIP = ip.String()
+	} else {
+		p.factory.errLog.Warn().Err(err).Msg("failed to get downstream remote IP")
 	}
 
-	// Default protocol if not set.
-	if p.request.proto == "" {
-		p.request.proto = "HTTP/1.1"
+	var clientIP string
+	if xff := ctx.Headers.Get("x-forwarded-for"); xff != "" {
+		first := strings.TrimSpace(xff[:strings.IndexByte(xff, ',')])
+		if ip, err := extproc.ParseIPFromAddress(first); err == nil {
+			clientIP = ip.String()
+		} else {
+			p.factory.errLog.Warn().Err(err).Str("xff", xff).Msg("failed to parse client IP from X-Forwarded-For")
+		}
 	}
 
-	// Include request headers if enabled.
-	if p.factory.includeRequestHeaders {
-		p.request.headers = p.filterHeaders(ctx.Headers)
+	p.request = requestInfo{
+		RemoteIP: remoteIP,
+		ClientIP: clientIP,
+		Proto:    extproc.FirstNonEmpty(ctx.Headers.Get("x-forwarded-proto"), ctx.Headers.Get(":protocol")),
+		Host:     extproc.FirstNonEmpty(ctx.Headers.Get("x-forwarded-host"), ctx.Headers.Get(":authority"), ctx.Headers.Get("host")),
+		Method:   ctx.Headers.Get(":method"),
+		URI:      extproc.FirstNonEmpty(ctx.Headers.Get("x-envoy-original-path"), ctx.Headers.Get(":path")),
+		Headers:  p.headersToCaddyMap(ctx.Headers),
+	}
+
+	if cl := ctx.Headers.Get("content-length"); cl != "" {
+		if n, err := strconv.ParseUint(cl, 10, 64); err == nil {
+			p.request.Size = &n
+		} else {
+			p.factory.errLog.Warn().Err(err).Str("content-length", cl).Msg("failed to parse content length")
+		}
 	}
 
 	return extproc.ContinueResult()
 }
 
-// ProcessResponseHeaders captures response status and headers.
 func (p *Processor) ProcessResponseHeaders(ctx *extproc.RequestContext) *extproc.ProcessingResult {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Extract status code.
 	if statusStr := ctx.Headers.Get(":status"); statusStr != "" {
 		if status, err := strconv.Atoi(statusStr); err == nil {
-			p.status = status
+			p.response.Status = status
 		}
 	}
 
-	// Include response headers if enabled.
-	if p.factory.includeResponseHeaders {
-		p.respHdrs = p.filterHeaders(ctx.Headers)
+	if cl := ctx.Headers.Get("content-length"); cl != "" {
+		if n, err := strconv.ParseUint(cl, 10, 64); err == nil {
+			p.response.Size = &n
+		} else {
+			p.factory.errLog.Warn().Err(err).Str("content-length", cl).Msg("failed to parse content length")
+		}
 	}
 
-	// If end of stream, emit the log entry now.
+	p.response.Headers = p.headersToCaddyMap(ctx.Headers)
+
 	if ctx.EndOfStream {
 		p.emitLog()
 	}
@@ -162,21 +149,6 @@ func (p *Processor) ProcessResponseHeaders(ctx *extproc.RequestContext) *extproc
 	return extproc.ContinueResult()
 }
 
-// ProcessResponseBody tracks response size and emits log at end of stream.
-func (p *Processor) ProcessResponseBody(ctx *extproc.RequestContext, body []byte, endOfStream bool) *extproc.ProcessingResult {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.size += int64(len(body))
-
-	if endOfStream {
-		p.emitLog()
-	}
-
-	return extproc.ContinueResult()
-}
-
-// ProcessResponseTrailers emits log entry if not already done.
 func (p *Processor) ProcessResponseTrailers(ctx *extproc.RequestContext) *extproc.ProcessingResult {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -185,69 +157,58 @@ func (p *Processor) ProcessResponseTrailers(ctx *extproc.RequestContext) *extpro
 	return extproc.ContinueResult()
 }
 
-// filterHeaders returns a copy of headers with excluded headers removed.
-func (p *Processor) filterHeaders(headers http.Header) http.Header {
-	filtered := make(http.Header, len(headers))
+func (p *Processor) headersToCaddyMap(headers http.Header) map[string][]string {
+	out := make(map[string][]string, len(headers))
 	for key, values := range headers {
-		// Skip pseudo-headers for the headers map (they're in dedicated fields).
-		if strings.HasPrefix(key, ":") {
-			continue
+		if !strings.HasPrefix(key, ":") {
+			key = http.CanonicalHeaderKey(key)
 		}
-		lowerKey := strings.ToLower(key)
-		if _, excluded := p.factory.excludeHeaders[lowerKey]; excluded {
-			continue
+		if slices.ContainsFunc(p.factory.excludeHeaders, func(h string) bool {
+			return strings.EqualFold(h, key)
+		}) {
+			out[key] = []string{"REDACTED"}
+		} else {
+			out[key] = values
 		}
-		filtered[key] = values
 	}
-	return filtered
+	return out
 }
 
-// emitLog writes the access log entry using zerolog. Must be called with p.mu held.
 func (p *Processor) emitLog() {
 	if p.logged {
 		return
 	}
 	p.logged = true
 
-	duration := time.Since(p.startTime)
-
-	// Build the log event with Caddy-style structure.
-	event := p.factory.accessLog.Info().
-		Str("msg", "handled request").
-		Int("status", p.status).
-		Int64("size", p.size).
-		Dur("duration", duration).
-		Float64("duration_ms", float64(duration.Microseconds())/1000.0)
-
-	// Add request object.
-	event = event.Dict("request", zerolog.Dict().
-		Str("remote_ip", p.request.remoteIP).
-		Str("proto", p.request.proto).
-		Str("method", p.request.method).
-		Str("host", p.request.host).
-		Str("uri", p.request.uri).
-		Interface("headers", p.headersToMap(p.request.headers)),
-	)
-
-	// Add response headers if enabled.
-	if p.factory.includeResponseHeaders && len(p.respHdrs) > 0 {
-		event = event.Interface("resp_headers", p.headersToMap(p.respHdrs))
+	level := zerolog.InfoLevel
+	if p.response.Status >= 500 {
+		level = zerolog.ErrorLevel
 	}
 
-	event.Send()
+	event := p.factory.accessLog.WithLevel(level)
+
+	reqDict := zerolog.Dict().
+		Str("remote_ip", p.request.RemoteIP).
+		Str("client_ip", p.request.ClientIP).
+		Str("proto", p.request.Proto).
+		Str("method", p.request.Method).
+		Str("host", p.request.Host).
+		Str("uri", p.request.URI).
+		Time("start_time", p.request.StartTime).
+		Interface("size", p.request.Size).
+		Interface("headers", p.request.Headers)
+
+	event = event.Dict("request", reqDict)
+
+	event = event.
+		Dur("duration", time.Since(p.request.StartTime)).
+		Interface("size", p.response.Size).
+		Int("status", p.response.Status).
+		Interface("resp_headers", p.response.Headers)
+
+	event.Msg("request processed")
 }
 
-// headersToMap converts http.Header to a simple map for logging.
-// Returns nil if headers is empty to omit the field.
-func (p *Processor) headersToMap(headers http.Header) map[string][]string {
-	if len(headers) == 0 {
-		return nil
-	}
-	return headers
-}
-
-// Ensure ProcessorFactory implements extproc.ProcessorFactory.
 var _ extproc.ProcessorFactory = (*ProcessorFactory)(nil)
 
-// Ensure Processor implements extproc.Processor.
 var _ extproc.Processor = (*Processor)(nil)

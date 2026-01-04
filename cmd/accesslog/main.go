@@ -1,7 +1,6 @@
 package main
 
 import (
-	"io"
 	"os"
 
 	"github.com/alecthomas/kong"
@@ -22,38 +21,14 @@ func main() {
 
 	log := logger.New()
 
-	// Setup access log output writer.
-	var accessLogWriter io.Writer
-	switch cli.AccessLog.Output {
-	case "stdout":
-		accessLogWriter = os.Stdout
-	case "stderr":
-		accessLogWriter = os.Stderr
-	default:
-		f, err := os.OpenFile(cli.AccessLog.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			log.Fatal().
-				Err(err).
-				Str("output", cli.AccessLog.Output).
-				Msg("failed to open access log file")
-		}
-		defer f.Close()
-		accessLogWriter = f
-	}
-
 	log.Info().
-		Str("output", cli.AccessLog.Output).
-		Bool("include_request_headers", cli.AccessLog.IncludeRequestHeaders).
-		Bool("include_response_headers", cli.AccessLog.IncludeResponseHeaders).
-		Strs("exclude_headers", cli.AccessLog.ExcludeHeaders).
+		Strs("exclude_headers", cli.ExcludeHeaders).
 		Msg("access log processor configured")
 
 	factory := accesslog.NewProcessorFactory(
-		accessLogWriter,
+		os.Stdout,
 		log,
-		accesslog.WithRequestHeaders(cli.AccessLog.IncludeRequestHeaders),
-		accesslog.WithResponseHeaders(cli.AccessLog.IncludeResponseHeaders),
-		accesslog.WithExcludeHeaders(cli.AccessLog.ExcludeHeaders),
+		accesslog.WithExcludeHeaders(cli.ExcludeHeaders...),
 	)
 
 	if err := server.Run(server.Config{

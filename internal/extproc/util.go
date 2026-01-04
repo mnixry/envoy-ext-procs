@@ -3,6 +3,7 @@ package extproc
 import (
 	"net/http"
 	"net/netip"
+	"strings"
 
 	"github.com/samber/oops"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -12,11 +13,23 @@ const (
 	HeaderEnvoyExternalAddr = "x-envoy-external-address"
 )
 
-// GetDownstreamRemoteIP extracts the downstream client IP from ext_proc attributes or headers.
-// It first checks the ext_proc attributes for source.address, then falls back to
-// the x-envoy-external-address header.
+func ParseIPFromAddress(addr string) (netip.Addr, error) {
+	ip, errParse := netip.ParseAddr(strings.Trim(addr, "[]"))
+	if errParse == nil {
+		return ip, nil
+	}
+	ap, errParseAddrPort := netip.ParseAddrPort(addr)
+	if errParseAddrPort == nil {
+		return ap.Addr(), nil
+	}
+	return netip.Addr{}, oops.
+		In("extproc").
+		Code("PARSE_IP_FROM_ADDRESS_FAILED").
+		With("addr", addr).
+		Join(errParse, errParseAddrPort)
+}
+
 func GetDownstreamRemoteIP(attrs map[string]*structpb.Struct, headers http.Header) (netip.Addr, error) {
-	// Try source.address from ext_proc attributes first.
 	if attr, ok := attrs["envoy.filters.http.ext_proc"]; ok {
 		if field, ok := attr.Fields["source.address"]; ok {
 			ip, err := ParseIPFromAddress(field.GetStringValue())
@@ -31,4 +44,14 @@ func GetDownstreamRemoteIP(attrs map[string]*structpb.Struct, headers http.Heade
 		With("attrs", attrs).
 		With("headers", headers).
 		New("downstream remote IP not found")
+}
+
+func FirstNonEmpty[T comparable](values ...T) T {
+	var empty T
+	for _, v := range values {
+		if v != empty {
+			return v
+		}
+	}
+	return empty
 }

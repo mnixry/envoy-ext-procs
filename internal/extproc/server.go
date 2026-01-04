@@ -4,14 +4,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/netip"
 	"strings"
 	"time"
 
 	envoy_api_v3_core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	envoy_service_proc_v3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/rs/zerolog"
-	"github.com/samber/oops"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -305,20 +303,4 @@ func SetHeader(key, value string) *envoy_api_v3_core.HeaderValueOption {
 		},
 		AppendAction: envoy_api_v3_core.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 	}
-}
-
-func ParseIPFromAddress(addr string) (netip.Addr, error) {
-	ip, errParse := netip.ParseAddr(strings.Trim(addr, "[]"))
-	if errParse == nil {
-		return ip, nil
-	}
-	ap, errParseAddrPort := netip.ParseAddrPort(addr)
-	if errParseAddrPort == nil {
-		return ap.Addr(), nil
-	}
-	return netip.Addr{}, oops.
-		In("extproc").
-		Code("PARSE_IP_FROM_ADDRESS_FAILED").
-		With("addr", addr).
-		Join(errParse, errParseAddrPort)
 }
