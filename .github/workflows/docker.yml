@@ -23,12 +23,24 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@main
-      - uses: docker/setup-buildx-action@master
+      - id: setup-buildx
+        uses: docker/setup-buildx-action@master
       - uses: docker/login-action@master
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/cache@main
+        id: cache
+        with:
+          path: cache-mount
+          key: cache-mount-${{ hashFiles('Dockerfile') }}
+      - uses: reproducible-containers/buildkit-cache-dance@main
+        with:
+          builder: ${{ steps.setup-buildx.outputs.name }}
+          cache-dir: cache-mount
+          dockerfile: Dockerfile
+          skip-extraction: ${{ steps.cache.outputs.cache-hit }}
       - id: meta
         uses: docker/metadata-action@master
         with:
