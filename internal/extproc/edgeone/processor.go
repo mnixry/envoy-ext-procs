@@ -63,7 +63,7 @@ type Processor struct {
 
 // ProcessRequestHeaders validates the source IP and sets trust headers.
 func (p *Processor) ProcessRequestHeaders(ctx *extproc.RequestContext) *extproc.ProcessingResult {
-	remoteIP, err := extproc.GetDownstreamRemoteIP(ctx.Attributes, ctx.Headers)
+	remoteIP, err := ctx.GetDownstreamRemoteIP()
 	if err != nil {
 		p.log.Warn().Err(err).Msg("failed to get downstream remote IP")
 		return extproc.ContinueWithHeaders([]*envoy_api_v3_core.HeaderValueOption{

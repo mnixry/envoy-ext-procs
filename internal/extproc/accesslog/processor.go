@@ -85,7 +85,7 @@ func (p *Processor) ProcessRequestHeaders(ctx *extproc.RequestContext) *extproc.
 	defer p.mu.Unlock()
 
 	var remoteIP string
-	if ip, err := extproc.GetDownstreamRemoteIP(ctx.Attributes, ctx.Headers); err == nil {
+	if ip, err := ctx.GetDownstreamRemoteIP(); err == nil {
 		remoteIP = ip.String()
 	} else {
 		p.factory.errLog.Warn().Err(err).Msg("failed to get downstream remote IP")

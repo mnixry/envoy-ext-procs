@@ -2,11 +2,15 @@ package extproc
 
 import (
 	"net/http"
+	"net/netip"
 
 	envoy_api_v3_core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	envoy_service_proc_v3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/samber/oops"
 	"google.golang.org/protobuf/types/known/structpb"
 )
+
+const envoyAttributesKey = "envoy.filters.http.ext_proc"
 
 // RequestContext provides context for processing a single request phase.
 type RequestContext struct {
@@ -16,6 +20,32 @@ type RequestContext struct {
 	Headers http.Header
 	// EndOfStream indicates if this is the final message for this phase.
 	EndOfStream bool
+}
+
+func (c *RequestContext) GetEnvoyAttributeValue(key string) (*structpb.Value, bool) {
+	if attr, ok := c.Attributes[envoyAttributesKey]; ok {
+		if field, ok := attr.Fields[key]; ok {
+			return field, true
+		}
+	}
+	return nil, false
+}
+
+func (c *RequestContext) GetDownstreamRemoteIP() (netip.Addr, error) {
+	if value, ok := c.GetEnvoyAttributeValue("source.address"); ok {
+		ip, err := ParseIPFromAddress(value.GetStringValue())
+		return oops.Wrap2(ip, err)
+	}
+	if c.Headers != nil {
+		if v := c.Headers.Get(HeaderEnvoyExternalAddr); v != "" {
+			ip, err := ParseIPFromAddress(v)
+			return oops.Wrap2(ip, err)
+		}
+	}
+	return netip.Addr{}, oops.
+		With("attrs", c.Attributes).
+		With("headers", c.Headers).
+		New("downstream remote IP not found")
 }
 
 // HeaderMutations represents header modifications to apply.
