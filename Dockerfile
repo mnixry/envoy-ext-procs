@@ -7,7 +7,7 @@ RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
 COPY . .
 RUN --mount=type=cache,id=go-build,target=/root/.cache/go-build \
     --mount=type=cache,id=go-mod,target=/go/pkg/mod \
-    make -j$(nproc) build
+    make build
 
 FROM debian:trixie-slim AS runner
 
