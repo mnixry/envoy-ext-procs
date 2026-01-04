@@ -112,13 +112,15 @@ func (p *Processor) ProcessRequestHeaders(ctx *extproc.RequestContext) *extproc.
 	}
 
 	info := &requestInfo{
-		RemoteIP: remoteIP,
-		ClientIP: clientIP,
-		Proto:    extproc.FirstNonEmpty(ctx.Headers.Get("x-forwarded-proto"), ctx.Headers.Get(":protocol")),
-		Host:     extproc.FirstNonEmpty(ctx.Headers.Get("x-forwarded-host"), ctx.Headers.Get(":authority"), ctx.Headers.Get("host")),
-		Method:   ctx.Headers.Get(":method"),
-		URI:      extproc.FirstNonEmpty(ctx.Headers.Get("x-envoy-original-path"), ctx.Headers.Get(":path")),
-		Headers:  p.redactHeaders(ctx.Headers),
+		ID:        requestID,
+		RemoteIP:  remoteIP,
+		ClientIP:  clientIP,
+		Proto:     extproc.FirstNonEmpty(ctx.Headers.Get("x-forwarded-proto"), ctx.Headers.Get(":protocol")),
+		Host:      extproc.FirstNonEmpty(ctx.Headers.Get("x-forwarded-host"), ctx.Headers.Get(":authority"), ctx.Headers.Get("host")),
+		Method:    ctx.Headers.Get(":method"),
+		URI:       extproc.FirstNonEmpty(ctx.Headers.Get("x-envoy-original-path"), ctx.Headers.Get(":path")),
+		Headers:   p.redactHeaders(ctx.Headers),
+		StartTime: time.Now(),
 	}
 
 	if cl := ctx.Headers.Get("content-length"); cl != "" {
