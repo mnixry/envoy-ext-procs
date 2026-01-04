@@ -8,7 +8,6 @@ import (
 	"github.com/mnixry/envoy-ext-procs/internal/extproc/accesslog"
 	"github.com/mnixry/envoy-ext-procs/internal/logger"
 	"github.com/mnixry/envoy-ext-procs/internal/server"
-	"github.com/rs/zerolog"
 )
 
 func main() {
@@ -17,12 +16,13 @@ func main() {
 		kong.Description("Envoy external processor that emits Caddy-style JSON access logs."),
 		kong.UsageOnError(),
 	)
-	zerolog.SetGlobalLevel(cli.LogLevel)
 
-	log := logger.New()
+	log := logger.New(cli.Log)
 
 	log.Info().
 		Strs("exclude_headers", cli.ExcludeHeaders).
+		Str("log_output", cli.Log.Output).
+		Str("log_format", string(cli.Log.Format)).
 		Msg("access log processor configured")
 
 	factory := accesslog.NewProcessorFactory(

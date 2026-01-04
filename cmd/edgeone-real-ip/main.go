@@ -9,7 +9,6 @@ import (
 	edgeoneproc "github.com/mnixry/envoy-ext-procs/internal/extproc/edgeone"
 	"github.com/mnixry/envoy-ext-procs/internal/logger"
 	"github.com/mnixry/envoy-ext-procs/internal/server"
-	"github.com/rs/zerolog"
 )
 
 func main() {
@@ -18,9 +17,8 @@ func main() {
 		kong.Description("Envoy external processor that validates EdgeOne CDN requests and sets real client IP headers."),
 		kong.UsageOnError(),
 	)
-	zerolog.SetGlobalLevel(cli.LogLevel)
 
-	log := logger.New()
+	log := logger.New(cli.Log)
 
 	validator, err := edgeone.New(edgeone.Config{
 		SecretID:    cli.EdgeOne.SecretID,
@@ -41,6 +39,8 @@ func main() {
 		Int("cache_size", cli.EdgeOne.CacheSize).
 		Dur("cache_ttl", cli.EdgeOne.CacheTTL).
 		Dur("timeout", cli.EdgeOne.Timeout).
+		Str("log_output", cli.Log.Output).
+		Str("log_format", string(cli.Log.Format)).
 		Msg("edgeone validator configured")
 
 	factory := edgeoneproc.NewProcessorFactory(validator, log)

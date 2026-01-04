@@ -1,17 +1,13 @@
 package config
 
-import (
-	"time"
-
-	"github.com/rs/zerolog"
-)
+import "time"
 
 // EdgeOneCLI is the CLI configuration for the EdgeOne real IP processor.
 type EdgeOneCLI struct {
-	GRPC     GRPCConfig    `embed:"" prefix:"grpc-" envprefix:"GRPC_"`
-	Health   HealthConfig  `embed:"" prefix:"health-" envprefix:"HEALTH_"`
-	EdgeOne  EdgeOneConfig `embed:"" prefix:"edgeone-" envprefix:"EDGEONE_"`
-	LogLevel zerolog.Level `name:"log-level" env:"LOG_LEVEL" default:"info" help:"Log level (debug, info, warn, error, fatal, panic)."`
+	GRPC    GRPCConfig    `embed:"" prefix:"grpc-" envprefix:"GRPC_"`
+	Health  HealthConfig  `embed:"" prefix:"health-" envprefix:"HEALTH_"`
+	EdgeOne EdgeOneConfig `embed:"" prefix:"edgeone-" envprefix:"EDGEONE_"`
+	Log     LogConfig     `embed:"" prefix:"log-" envprefix:"LOG_"`
 }
 
 // EdgeOneConfig holds EdgeOne API configuration.
