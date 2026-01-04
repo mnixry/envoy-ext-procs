@@ -36,3 +36,15 @@ func FirstNonEmpty[T comparable](values ...T) T {
 	}
 	return empty
 }
+
+func FirstNonEmptyFn[T comparable](factories ...func() (T, error)) (T, error) {
+	var empty T
+	for _, factory := range factories {
+		if v, err := factory(); err != nil {
+			return empty, err
+		} else if v != empty {
+			return v, nil
+		}
+	}
+	return empty, oops.New("no non-empty value found")
+}

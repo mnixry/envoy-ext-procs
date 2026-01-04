@@ -166,7 +166,7 @@ func (p *Processor) ProcessResponseHeaders(ctx *extproc.RequestContext) *extproc
 		}
 	}
 
-	if err := emitLog(p.factory.accessLog, request, response, ctx.GetEnvoyAttributeValueMap()); err != nil {
+	if err := emitLog(p.factory.accessLog, request, response, ctx); err != nil {
 		p.factory.errLog.Error().Err(err).Msg("failed to emit access log")
 	}
 	return extproc.ContinueResult()
@@ -189,7 +189,7 @@ func (p *Processor) redactHeaders(headers http.Header) map[string][]string {
 	return out
 }
 
-func emitLog(log zerolog.Logger, request *requestInfo, response *responseInfo, attrs map[string]any) error {
+func emitLog(log zerolog.Logger, request *requestInfo, response *responseInfo, ctx *extproc.RequestContext) error {
 	level := zerolog.InfoLevel
 	if response.Status >= 500 {
 		level = zerolog.ErrorLevel
@@ -202,10 +202,10 @@ func emitLog(log zerolog.Logger, request *requestInfo, response *responseInfo, a
 		return oops.With("request", request).Wrapf(err, "failed to marshal request")
 	}
 
-	if jsonAttr, err := json.Marshal(attrs); err == nil {
+	if jsonAttr, err := json.Marshal(ctx.Attributes); err == nil {
 		event = event.RawJSON("attrs", jsonAttr)
 	} else {
-		return oops.With("attrs", attrs).Wrapf(err, "failed to marshal attributes")
+		return oops.With("attrs", ctx.Attributes).Wrapf(err, "failed to marshal attributes")
 	}
 
 	event.
