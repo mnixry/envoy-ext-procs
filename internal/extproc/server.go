@@ -2,7 +2,6 @@ package extproc
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
@@ -15,91 +14,83 @@ import (
 	"github.com/samber/oops"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/structpb"
 )
 
-const (
-	HeaderTrusted           = "x-forwarded-from-edgeone"
-	HeaderDownstreamRealIP  = "eo-connecting-ip"
-	HeaderXFF               = "x-forwarded-for"
-	HeaderXRealIP           = "x-real-ip"
-	HeaderEnvoyExternalAddr = "x-envoy-external-address"
-)
-
-type TrustLevel string
-
-const (
-	TrustLevelNo      TrustLevel = "no"
-	TrustLevelYes     TrustLevel = "yes"
-	TrustLevelUnknown TrustLevel = "unknown"
-)
-
-type EdgeOneValidator interface {
-	IsEdgeOneIP(ip netip.Addr) (bool, error)
-}
-
+// Server implements the Envoy ExternalProcessor gRPC service.
+// It delegates request processing to a ProcessorFactory.
 type Server struct {
 	envoy_service_proc_v3.UnimplementedExternalProcessorServer
 
-	edgeone EdgeOneValidator
+	factory ProcessorFactory
 	log     zerolog.Logger
 }
 
-func New(edgeone EdgeOneValidator, log zerolog.Logger) *Server {
+// NewServer creates a new ext_proc Server with the given ProcessorFactory.
+func NewServer(factory ProcessorFactory, log zerolog.Logger) *Server {
 	return &Server{
-		edgeone: edgeone,
+		factory: factory,
 		log:     log.With().Str("component", "extproc").Logger(),
 	}
 }
 
+// Process handles the bidirectional streaming RPC for external processing.
 func (s *Server) Process(srv envoy_service_proc_v3.ExternalProcessor_ProcessServer) error {
 	ctx := srv.Context()
+	processor := s.factory.NewProcessor()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		if req, err := srv.Recv(); err == nil {
-			go func() {
-				start := time.Now()
-				resp := s.processOne(req)
-				s.log.Trace().
-					Dur("duration", time.Since(start)).
-					Interface("request", req).
-					Interface("response", resp).
-					Msg("request processed")
-				if err := srv.Send(resp); err != nil {
-					s.log.Error().Err(oops.Wrapf(err, "failed to send response")).Send()
-				}
-			}()
-		} else if status.Code(err) == codes.Canceled || errors.Is(err, io.EOF) {
-			return nil
-		} else {
-			s.log.Error().Err(oops.Wrapf(err, "failed to receive request")).Send()
+
+		req, err := srv.Recv()
+		if err != nil {
+			if status.Code(err) == codes.Canceled || errors.Is(err, io.EOF) {
+				return nil
+			}
+			s.log.Error().Err(err).Msg("failed to receive request")
 			return status.Errorf(codes.Unknown, "cannot receive stream request: %v", err)
 		}
+
+		go func() {
+			start := time.Now()
+			resp := s.processOne(processor, req)
+			s.log.Trace().
+				Dur("duration", time.Since(start)).
+				Interface("request", req).
+				Interface("response", resp).
+				Msg("request processed")
+			if err := srv.Send(resp); err != nil {
+				s.log.Error().Err(err).Msg("failed to send response")
+			}
+		}()
 	}
 }
 
-func (s *Server) processOne(req *envoy_service_proc_v3.ProcessingRequest) *envoy_service_proc_v3.ProcessingResponse {
+func (s *Server) processOne(
+	processor Processor,
+	req *envoy_service_proc_v3.ProcessingRequest,
+) *envoy_service_proc_v3.ProcessingResponse {
 	s.log.Debug().
 		Interface("request", req.Request).
 		Type("request_type", req.Request).
 		Msg("processing request")
+
 	switch v := req.Request.(type) {
 	case *envoy_service_proc_v3.ProcessingRequest_RequestHeaders:
-		return s.processRequestHeaders(req, v.RequestHeaders)
+		return s.handleRequestHeaders(processor, req, v.RequestHeaders)
 	case *envoy_service_proc_v3.ProcessingRequest_ResponseHeaders:
-		return continueResponseHeaders()
+		return s.handleResponseHeaders(processor, req, v.ResponseHeaders)
 	case *envoy_service_proc_v3.ProcessingRequest_RequestBody:
-		return continueRequestBody()
+		return s.handleRequestBody(processor, req, v.RequestBody)
 	case *envoy_service_proc_v3.ProcessingRequest_ResponseBody:
-		return continueResponseBody()
+		return s.handleResponseBody(processor, req, v.ResponseBody)
 	case *envoy_service_proc_v3.ProcessingRequest_RequestTrailers:
-		return continueRequestTrailers()
+		return s.handleRequestTrailers(processor, req, v.RequestTrailers)
 	case *envoy_service_proc_v3.ProcessingRequest_ResponseTrailers:
-		return continueResponseTrailers()
+		return s.handleResponseTrailers(processor, req, v.ResponseTrailers)
 	default:
 		s.log.Warn().
 			Interface("request", req.Request).
@@ -109,149 +100,203 @@ func (s *Server) processOne(req *envoy_service_proc_v3.ProcessingRequest) *envoy
 	}
 }
 
-func (s *Server) processRequestHeaders(
+func (s *Server) handleRequestHeaders(
+	processor Processor,
 	req *envoy_service_proc_v3.ProcessingRequest,
 	h *envoy_service_proc_v3.HttpHeaders,
 ) *envoy_service_proc_v3.ProcessingResponse {
+	ctx := &RequestContext{
+		Attributes:  req.GetAttributes(),
+		Headers:     parseHeaders(h),
+		EndOfStream: h.GetEndOfStream(),
+	}
+
+	result := processor.ProcessRequestHeaders(ctx)
+	return buildHeadersResponse(result, func(resp *envoy_service_proc_v3.HeadersResponse) *envoy_service_proc_v3.ProcessingResponse {
+		return &envoy_service_proc_v3.ProcessingResponse{
+			Response: &envoy_service_proc_v3.ProcessingResponse_RequestHeaders{
+				RequestHeaders: resp,
+			},
+		}
+	})
+}
+
+func (s *Server) handleResponseHeaders(
+	processor Processor,
+	req *envoy_service_proc_v3.ProcessingRequest,
+	h *envoy_service_proc_v3.HttpHeaders,
+) *envoy_service_proc_v3.ProcessingResponse {
+	ctx := &RequestContext{
+		Attributes:  req.GetAttributes(),
+		Headers:     parseHeaders(h),
+		EndOfStream: h.GetEndOfStream(),
+	}
+
+	result := processor.ProcessResponseHeaders(ctx)
+	return buildHeadersResponse(result, func(resp *envoy_service_proc_v3.HeadersResponse) *envoy_service_proc_v3.ProcessingResponse {
+		return &envoy_service_proc_v3.ProcessingResponse{
+			Response: &envoy_service_proc_v3.ProcessingResponse_ResponseHeaders{
+				ResponseHeaders: resp,
+			},
+		}
+	})
+}
+
+func (s *Server) handleRequestBody(
+	processor Processor,
+	req *envoy_service_proc_v3.ProcessingRequest,
+	b *envoy_service_proc_v3.HttpBody,
+) *envoy_service_proc_v3.ProcessingResponse {
+	ctx := &RequestContext{
+		Attributes:  req.GetAttributes(),
+		EndOfStream: b.GetEndOfStream(),
+	}
+
+	result := processor.ProcessRequestBody(ctx, b.GetBody(), b.GetEndOfStream())
+	return buildBodyResponse(result, func(resp *envoy_service_proc_v3.BodyResponse) *envoy_service_proc_v3.ProcessingResponse {
+		return &envoy_service_proc_v3.ProcessingResponse{
+			Response: &envoy_service_proc_v3.ProcessingResponse_RequestBody{
+				RequestBody: resp,
+			},
+		}
+	})
+}
+
+func (s *Server) handleResponseBody(
+	processor Processor,
+	req *envoy_service_proc_v3.ProcessingRequest,
+	b *envoy_service_proc_v3.HttpBody,
+) *envoy_service_proc_v3.ProcessingResponse {
+	ctx := &RequestContext{
+		Attributes:  req.GetAttributes(),
+		EndOfStream: b.GetEndOfStream(),
+	}
+
+	result := processor.ProcessResponseBody(ctx, b.GetBody(), b.GetEndOfStream())
+	return buildBodyResponse(result, func(resp *envoy_service_proc_v3.BodyResponse) *envoy_service_proc_v3.ProcessingResponse {
+		return &envoy_service_proc_v3.ProcessingResponse{
+			Response: &envoy_service_proc_v3.ProcessingResponse_ResponseBody{
+				ResponseBody: resp,
+			},
+		}
+	})
+}
+
+func (s *Server) handleRequestTrailers(
+	processor Processor,
+	req *envoy_service_proc_v3.ProcessingRequest,
+	_ *envoy_service_proc_v3.HttpTrailers,
+) *envoy_service_proc_v3.ProcessingResponse {
+	ctx := &RequestContext{
+		Attributes: req.GetAttributes(),
+	}
+
+	result := processor.ProcessRequestTrailers(ctx)
+	return buildTrailersResponse(result, func(resp *envoy_service_proc_v3.TrailersResponse) *envoy_service_proc_v3.ProcessingResponse {
+		return &envoy_service_proc_v3.ProcessingResponse{
+			Response: &envoy_service_proc_v3.ProcessingResponse_RequestTrailers{
+				RequestTrailers: resp,
+			},
+		}
+	})
+}
+
+func (s *Server) handleResponseTrailers(
+	processor Processor,
+	req *envoy_service_proc_v3.ProcessingRequest,
+	_ *envoy_service_proc_v3.HttpTrailers,
+) *envoy_service_proc_v3.ProcessingResponse {
+	ctx := &RequestContext{
+		Attributes: req.GetAttributes(),
+	}
+
+	result := processor.ProcessResponseTrailers(ctx)
+	return buildTrailersResponse(result, func(resp *envoy_service_proc_v3.TrailersResponse) *envoy_service_proc_v3.ProcessingResponse {
+		return &envoy_service_proc_v3.ProcessingResponse{
+			Response: &envoy_service_proc_v3.ProcessingResponse_ResponseTrailers{
+				ResponseTrailers: resp,
+			},
+		}
+	})
+}
+
+// Helper functions for building responses.
+
+func parseHeaders(h *envoy_service_proc_v3.HttpHeaders) http.Header {
+	if h == nil {
+		return make(http.Header)
+	}
+	headers := make(http.Header)
+	for _, hdr := range h.GetHeaders().GetHeaders() {
+		if raw := hdr.GetRawValue(); len(raw) > 0 {
+			headers.Add(hdr.GetKey(), string(raw))
+		} else {
+			headers.Add(hdr.GetKey(), hdr.GetValue())
+		}
+	}
+	return headers
+}
+
+func buildHeadersResponse(
+	result *ProcessingResult,
+	wrapper func(*envoy_service_proc_v3.HeadersResponse) *envoy_service_proc_v3.ProcessingResponse,
+) *envoy_service_proc_v3.ProcessingResponse {
+	if result.ImmediateResponse != nil {
+		return &envoy_service_proc_v3.ProcessingResponse{
+			Response: &envoy_service_proc_v3.ProcessingResponse_ImmediateResponse{
+				ImmediateResponse: result.ImmediateResponse,
+			},
+		}
+	}
+
 	common := &envoy_service_proc_v3.CommonResponse{
-		Status: envoy_service_proc_v3.CommonResponse_CONTINUE,
+		Status: result.Status,
 	}
-	if h != nil {
-		headers := make(http.Header)
-		for _, hdr := range h.GetHeaders().GetHeaders() {
-			if raw := hdr.GetRawValue(); len(raw) > 0 {
-				headers.Add(hdr.GetKey(), string(raw))
-			} else {
-				headers.Add(hdr.GetKey(), hdr.GetValue())
-			}
-		}
-		setHeaders := s.edgeOneHeaderMutations(req.GetAttributes(), headers)
-		if len(setHeaders) > 0 {
-			common.HeaderMutation = &envoy_service_proc_v3.HeaderMutation{
-				SetHeaders: setHeaders,
-			}
+	if result.HeaderMutations != nil && len(result.HeaderMutations.SetHeaders) > 0 {
+		common.HeaderMutation = &envoy_service_proc_v3.HeaderMutation{
+			SetHeaders:    result.HeaderMutations.SetHeaders,
+			RemoveHeaders: result.HeaderMutations.RemoveHeaders,
 		}
 	}
-	return &envoy_service_proc_v3.ProcessingResponse{
-		Response: &envoy_service_proc_v3.ProcessingResponse_RequestHeaders{
-			RequestHeaders: &envoy_service_proc_v3.HeadersResponse{Response: common},
-		},
-	}
+	return wrapper(&envoy_service_proc_v3.HeadersResponse{Response: common})
 }
 
-func (s *Server) edgeOneHeaderMutations(
-	attrs map[string]*structpb.Struct,
-	headers http.Header,
-) []*envoy_api_v3_core.HeaderValueOption {
-	remoteIP, ok := downstreamRemoteIP(attrs, headers)
-	if !ok {
-		s.log.Warn().
-			Interface("attrs", attrs).
-			Interface("headers", headers).
-			Msg("downstream remote IP not found")
-		return []*envoy_api_v3_core.HeaderValueOption{
-			setHeaderOverwrite(HeaderTrusted, string(TrustLevelUnknown)),
-		}
-	}
-
-	trustedVal := TrustLevelNo
-	if isEdgeOne, err := s.edgeone.IsEdgeOneIP(remoteIP); err == nil && isEdgeOne {
-		trustedVal = TrustLevelYes
-	} else if err != nil {
-		s.log.Error().
-			Err(oops.Wrapf(err, "edgeone validation failed")).
-			Str("remote_ip", remoteIP.String()).
-			Send()
-	}
-
-	remoteIPStr := remoteIP.String()
-	out := []*envoy_api_v3_core.HeaderValueOption{
-		setHeaderOverwrite(HeaderTrusted, string(trustedVal)),
-	}
-
-	if trustedVal == TrustLevelNo {
-		out = append(out,
-			setHeaderOverwrite(HeaderXFF, remoteIPStr),
-			setHeaderOverwrite(HeaderXRealIP, remoteIPStr),
-		)
-		return out
-	}
-
-	if downstreamRaw := headers.Get(HeaderDownstreamRealIP); downstreamRaw != "" {
-		if downstreamIP, ok := parseIPFromAddress(downstreamRaw); ok {
-			downstreamIPStr := downstreamIP.String()
-			out = append(out,
-				setHeaderOverwrite(HeaderXFF, fmt.Sprintf("%s, %s", downstreamIPStr, remoteIPStr)),
-				setHeaderOverwrite(HeaderXRealIP, downstreamIPStr),
-			)
-			return out
-		}
-	}
-
-	s.log.Warn().
-		Str("header", HeaderDownstreamRealIP).
-		Str("remote_ip", remoteIPStr).
-		Msg("edgeone missing or invalid header")
-	out = append(out,
-		setHeaderOverwrite(HeaderXFF, remoteIPStr),
-		setHeaderOverwrite(HeaderXRealIP, remoteIPStr),
-	)
-	return out
-}
-
-func continueResponseHeaders() *envoy_service_proc_v3.ProcessingResponse {
-	return &envoy_service_proc_v3.ProcessingResponse{
-		Response: &envoy_service_proc_v3.ProcessingResponse_ResponseHeaders{
-			ResponseHeaders: &envoy_service_proc_v3.HeadersResponse{
-				Response: &envoy_service_proc_v3.CommonResponse{
-					Status: envoy_service_proc_v3.CommonResponse_CONTINUE,
-				},
+func buildBodyResponse(
+	result *ProcessingResult,
+	wrapper func(*envoy_service_proc_v3.BodyResponse) *envoy_service_proc_v3.ProcessingResponse,
+) *envoy_service_proc_v3.ProcessingResponse {
+	if result.ImmediateResponse != nil {
+		return &envoy_service_proc_v3.ProcessingResponse{
+			Response: &envoy_service_proc_v3.ProcessingResponse_ImmediateResponse{
+				ImmediateResponse: result.ImmediateResponse,
 			},
-		},
+		}
 	}
+
+	return wrapper(&envoy_service_proc_v3.BodyResponse{
+		Response: &envoy_service_proc_v3.CommonResponse{
+			Status: result.Status,
+		},
+	})
 }
 
-func continueRequestBody() *envoy_service_proc_v3.ProcessingResponse {
-	return &envoy_service_proc_v3.ProcessingResponse{
-		Response: &envoy_service_proc_v3.ProcessingResponse_RequestBody{
-			RequestBody: &envoy_service_proc_v3.BodyResponse{
-				Response: &envoy_service_proc_v3.CommonResponse{
-					Status: envoy_service_proc_v3.CommonResponse_CONTINUE,
-				},
+func buildTrailersResponse(
+	result *ProcessingResult,
+	wrapper func(*envoy_service_proc_v3.TrailersResponse) *envoy_service_proc_v3.ProcessingResponse,
+) *envoy_service_proc_v3.ProcessingResponse {
+	if result.ImmediateResponse != nil {
+		return &envoy_service_proc_v3.ProcessingResponse{
+			Response: &envoy_service_proc_v3.ProcessingResponse_ImmediateResponse{
+				ImmediateResponse: result.ImmediateResponse,
 			},
-		},
+		}
 	}
+
+	return wrapper(&envoy_service_proc_v3.TrailersResponse{})
 }
 
-func continueResponseBody() *envoy_service_proc_v3.ProcessingResponse {
-	return &envoy_service_proc_v3.ProcessingResponse{
-		Response: &envoy_service_proc_v3.ProcessingResponse_ResponseBody{
-			ResponseBody: &envoy_service_proc_v3.BodyResponse{
-				Response: &envoy_service_proc_v3.CommonResponse{
-					Status: envoy_service_proc_v3.CommonResponse_CONTINUE,
-				},
-			},
-		},
-	}
-}
-
-func continueRequestTrailers() *envoy_service_proc_v3.ProcessingResponse {
-	return &envoy_service_proc_v3.ProcessingResponse{
-		Response: &envoy_service_proc_v3.ProcessingResponse_RequestTrailers{
-			RequestTrailers: &envoy_service_proc_v3.TrailersResponse{},
-		},
-	}
-}
-
-func continueResponseTrailers() *envoy_service_proc_v3.ProcessingResponse {
-	return &envoy_service_proc_v3.ProcessingResponse{
-		Response: &envoy_service_proc_v3.ProcessingResponse_ResponseTrailers{
-			ResponseTrailers: &envoy_service_proc_v3.TrailersResponse{},
-		},
-	}
-}
-
-func setHeaderOverwrite(key, value string) *envoy_api_v3_core.HeaderValueOption {
+// SetHeader creates a header value option that overwrites existing headers.
+func SetHeader(key, value string) *envoy_api_v3_core.HeaderValueOption {
 	return &envoy_api_v3_core.HeaderValueOption{
 		Header: &envoy_api_v3_core.HeaderValue{
 			Key:      strings.ToLower(key),
@@ -262,27 +307,18 @@ func setHeaderOverwrite(key, value string) *envoy_api_v3_core.HeaderValueOption 
 	}
 }
 
-func downstreamRemoteIP(attrs map[string]*structpb.Struct, headers http.Header) (netip.Addr, bool) {
-	// Try source.address from ext_proc attributes first.
-	if attr, ok := attrs["envoy.filters.http.ext_proc"]; ok {
-		if field, ok := attr.Fields["source.address"]; ok {
-			if ip, ok := parseIPFromAddress(field.GetStringValue()); ok {
-				return ip, true
-			}
-		}
+func ParseIPFromAddress(addr string) (netip.Addr, error) {
+	ip, errParse := netip.ParseAddr(strings.Trim(addr, "[]"))
+	if errParse == nil {
+		return ip, nil
 	}
-	if v := headers.Get(HeaderEnvoyExternalAddr); v != "" {
-		return parseIPFromAddress(v)
+	ap, errParseAddrPort := netip.ParseAddrPort(addr)
+	if errParseAddrPort == nil {
+		return ap.Addr(), nil
 	}
-	return netip.Addr{}, false
-}
-
-func parseIPFromAddress(addr string) (netip.Addr, bool) {
-	if ip, err := netip.ParseAddr(strings.Trim(addr, "[]")); err == nil {
-		return ip, true
-	} else if ap, err := netip.ParseAddrPort(addr); err == nil {
-		return ap.Addr(), true
-	} else {
-		return netip.Addr{}, false
-	}
+	return netip.Addr{}, oops.
+		In("extproc").
+		Code("PARSE_IP_FROM_ADDRESS_FAILED").
+		With("addr", addr).
+		Join(errParse, errParseAddrPort)
 }
