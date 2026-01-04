@@ -31,6 +31,16 @@ func (c *RequestContext) GetEnvoyAttributeValue(key string) (*structpb.Value, bo
 	return nil, false
 }
 
+func (c *RequestContext) GetEnvoyAttributeValueMap() map[string]any {
+	if attr, ok := c.Attributes[envoyAttributesKey]; ok {
+		out := make(map[string]any, len(attr.Fields))
+		for key, value := range attr.Fields {
+			out[key] = value.AsInterface()
+		}
+	}
+	return nil
+}
+
 func (c *RequestContext) GetDownstreamRemoteIP() (netip.Addr, error) {
 	if value, ok := c.GetEnvoyAttributeValue("source.address"); ok {
 		ip, err := ParseIPFromAddress(value.GetStringValue())
@@ -46,6 +56,16 @@ func (c *RequestContext) GetDownstreamRemoteIP() (netip.Addr, error) {
 		With("attrs", c.Attributes).
 		With("headers", c.Headers).
 		New("downstream remote IP not found")
+}
+
+func (c *RequestContext) GetRequestID() string {
+	if value, ok := c.GetEnvoyAttributeValue("request.id"); ok {
+		return value.GetStringValue()
+	}
+	if c.Headers != nil {
+		return c.Headers.Get("x-request-id")
+	}
+	return ""
 }
 
 // HeaderMutations represents header modifications to apply.

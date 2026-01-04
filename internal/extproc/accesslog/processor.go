@@ -1,16 +1,18 @@
 package accesslog
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/mnixry/envoy-ext-procs/internal/extproc"
 	"github.com/rs/zerolog"
+	"github.com/samber/oops"
 )
 
 var sensitiveHeaders = []string{
@@ -48,10 +50,19 @@ func NewProcessorFactory(writer io.Writer, log zerolog.Logger, opts ...Option) *
 
 // NewProcessor creates a new access log processor for a single request.
 func (f *ProcessorFactory) NewProcessor() extproc.Processor {
-	return &Processor{factory: f}
+	records, err := lru.New[string, *requestInfo](1000)
+	if err != nil {
+		f.errLog.Error().Err(err).Msg("failed to create records cache")
+		return nil
+	}
+	return &Processor{
+		factory: f,
+		records: records,
+	}
 }
 
 type requestInfo struct {
+	ID        string              `json:"id"`
 	RemoteIP  string              `json:"remote_ip"`
 	ClientIP  string              `json:"client_ip"`
 	Proto     string              `json:"proto"`
@@ -72,17 +83,16 @@ type responseInfo struct {
 type Processor struct {
 	extproc.BaseProcessor
 	factory *ProcessorFactory
-
-	mu       sync.Mutex
-	logged   bool
-	request  requestInfo
-	response responseInfo
+	records *lru.Cache[string, *requestInfo]
 }
 
 // ProcessRequestHeaders captures request metadata for logging.
 func (p *Processor) ProcessRequestHeaders(ctx *extproc.RequestContext) *extproc.ProcessingResult {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	requestID := ctx.GetRequestID()
+	if requestID == "" {
+		p.factory.errLog.Warn().Msg("request ID not found")
+		return extproc.ContinueResult()
+	}
 
 	var remoteIP string
 	if ip, err := ctx.GetDownstreamRemoteIP(); err == nil {
@@ -101,63 +111,66 @@ func (p *Processor) ProcessRequestHeaders(ctx *extproc.RequestContext) *extproc.
 		}
 	}
 
-	p.request = requestInfo{
+	info := &requestInfo{
 		RemoteIP: remoteIP,
 		ClientIP: clientIP,
 		Proto:    extproc.FirstNonEmpty(ctx.Headers.Get("x-forwarded-proto"), ctx.Headers.Get(":protocol")),
 		Host:     extproc.FirstNonEmpty(ctx.Headers.Get("x-forwarded-host"), ctx.Headers.Get(":authority"), ctx.Headers.Get("host")),
 		Method:   ctx.Headers.Get(":method"),
 		URI:      extproc.FirstNonEmpty(ctx.Headers.Get("x-envoy-original-path"), ctx.Headers.Get(":path")),
-		Headers:  p.headersToCaddyMap(ctx.Headers),
+		Headers:  p.redactHeaders(ctx.Headers),
 	}
 
 	if cl := ctx.Headers.Get("content-length"); cl != "" {
 		if n, err := strconv.ParseUint(cl, 10, 64); err == nil {
-			p.request.Size = &n
+			info.Size = &n
 		} else {
 			p.factory.errLog.Warn().Err(err).Str("content-length", cl).Msg("failed to parse content length")
 		}
 	}
 
+	p.records.Add(requestID, info)
 	return extproc.ContinueResult()
 }
 
 func (p *Processor) ProcessResponseHeaders(ctx *extproc.RequestContext) *extproc.ProcessingResult {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	var request *requestInfo
+	if id := ctx.GetRequestID(); id == "" {
+		p.factory.errLog.Warn().Msg("request ID not found")
+		return extproc.ContinueResult()
+	} else if record, ok := p.records.Peek(id); !ok {
+		p.factory.errLog.Warn().Str("id", id).Msg("request not found")
+		return extproc.ContinueResult()
+	} else {
+		request = record
+		p.records.Remove(id)
+	}
+
+	response := &responseInfo{
+		Headers: p.redactHeaders(ctx.Headers),
+	}
 
 	if statusStr := ctx.Headers.Get(":status"); statusStr != "" {
 		if status, err := strconv.Atoi(statusStr); err == nil {
-			p.response.Status = status
+			response.Status = status
 		}
 	}
 
 	if cl := ctx.Headers.Get("content-length"); cl != "" {
 		if n, err := strconv.ParseUint(cl, 10, 64); err == nil {
-			p.response.Size = &n
+			response.Size = &n
 		} else {
 			p.factory.errLog.Warn().Err(err).Str("content-length", cl).Msg("failed to parse content length")
 		}
 	}
 
-	p.response.Headers = p.headersToCaddyMap(ctx.Headers)
-
-	if ctx.EndOfStream {
-		p.emitLog()
+	if err := emitLog(p.factory.accessLog, request, response, ctx.GetEnvoyAttributeValueMap()); err != nil {
+		p.factory.errLog.Error().Err(err).Msg("failed to emit access log")
 	}
-
 	return extproc.ContinueResult()
 }
 
-func (p *Processor) ProcessResponseTrailers(ctx *extproc.RequestContext) *extproc.ProcessingResult {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.emitLog()
-	return extproc.ContinueResult()
-}
-
-func (p *Processor) headersToCaddyMap(headers http.Header) map[string][]string {
+func (p *Processor) redactHeaders(headers http.Header) map[string][]string {
 	out := make(map[string][]string, len(headers))
 	for key, values := range headers {
 		if !strings.HasPrefix(key, ":") {
@@ -174,39 +187,33 @@ func (p *Processor) headersToCaddyMap(headers http.Header) map[string][]string {
 	return out
 }
 
-func (p *Processor) emitLog() {
-	if p.logged {
-		return
-	}
-	p.logged = true
-
+func emitLog(log zerolog.Logger, request *requestInfo, response *responseInfo, attrs map[string]any) error {
 	level := zerolog.InfoLevel
-	if p.response.Status >= 500 {
+	if response.Status >= 500 {
 		level = zerolog.ErrorLevel
 	}
+	event := log.WithLevel(level)
 
-	event := p.factory.accessLog.WithLevel(level)
+	if jsonReq, err := json.Marshal(request); err == nil {
+		event = event.RawJSON("request", jsonReq)
+	} else {
+		return oops.With("request", request).Wrapf(err, "failed to marshal request")
+	}
 
-	reqDict := zerolog.Dict().
-		Str("remote_ip", p.request.RemoteIP).
-		Str("client_ip", p.request.ClientIP).
-		Str("proto", p.request.Proto).
-		Str("method", p.request.Method).
-		Str("host", p.request.Host).
-		Str("uri", p.request.URI).
-		Time("start_time", p.request.StartTime).
-		Interface("size", p.request.Size).
-		Interface("headers", p.request.Headers)
+	if jsonAttr, err := json.Marshal(attrs); err == nil {
+		event = event.RawJSON("attrs", jsonAttr)
+	} else {
+		return oops.With("attrs", attrs).Wrapf(err, "failed to marshal attributes")
+	}
 
-	event = event.Dict("request", reqDict)
-
-	event = event.
-		Dur("duration", time.Since(p.request.StartTime)).
-		Interface("size", p.response.Size).
-		Int("status", p.response.Status).
-		Interface("resp_headers", p.response.Headers)
-
-	event.Msg("request processed")
+	event.
+		Str("id", request.ID).
+		Dur("duration", time.Since(request.StartTime)).
+		Interface("size", response.Size).
+		Int("status", response.Status).
+		Interface("resp_headers", response.Headers).
+		Msg("request processed")
+	return nil
 }
 
 var _ extproc.ProcessorFactory = (*ProcessorFactory)(nil)
